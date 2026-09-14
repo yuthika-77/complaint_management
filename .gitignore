@@ -17,3 +17,13 @@ frontend/npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+.env
+venv/
+node_modules/
+dist/

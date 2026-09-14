@@ -1,5 +1,6 @@
 import os
-from typing import TypedDict, Optional
+import json
+from typing import TypedDict, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
@@ -7,89 +8,114 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Schema matching the exact reference UI form inputs
-class ExtractedComplaintData(BaseModel):
-    complaint_source: Optional[str] = Field(default="", description="Source of complaint, e.g. Hospital, Pharmacy, Distributor")
-    customer_name: Optional[str] = Field(default="", description="Name of reporting individual, clinic, or pharmacy")
-    product_name: Optional[str] = Field(default="", description="Name of the pharmaceutical drug or API")
-    product_strength_grade: Optional[str] = Field(default="", description="Strength (e.g., 500mg, 10ml) or API purity grade")
-    batch_number: Optional[str] = Field(default="", description="Batch / Lot number mentioned")
-    manufacturing_date: Optional[str] = Field(default="", description="YYYY-MM-DD format if available")
-    expiry_date: Optional[str] = Field(default="", description="YYYY-MM-DD format if available")
-    quantity_affected: Optional[str] = Field(default="", description="Number or weight of units affected (e.g., 100 vials, 50 kg)")
-    complaint_type: Optional[str] = Field(default="", description="Category: Packaging, Contamination, Physical Defect, Labeling, Efficacy")
-    complaint_date: Optional[str] = Field(default="", description="Date complaint was filed or received (YYYY-MM-DD)")
-    detailed_description: Optional[str] = Field(default="", description="Detailed narrative of the defect reported")
+class ComplaintFormModel(BaseModel):
+    complaint_source: Optional[str] = Field(default="", description="Source, e.g. Hospital, Pharmacy, Distributor")
+    customer_name: Optional[str] = Field(default="", description="Customer or reporting facility name")
+    product_name: Optional[str] = Field(default="", description="Product name or API")
+    product_strength_grade: Optional[str] = Field(default="", description="Strength (e.g. 500mg) or Grade (e.g. IP/BP)")
+    batch_number: Optional[str] = Field(default="", description="Batch or lot number")
+    manufacturing_date: Optional[str] = Field(default="", description="YYYY-MM-DD")
+    expiry_date: Optional[str] = Field(default="", description="YYYY-MM-DD")
+    quantity_affected: Optional[str] = Field(default="", description="Quantity affected with units")
+    complaint_type: Optional[str] = Field(default="", description="Complaint category/type")
+    complaint_date: Optional[str] = Field(default="", description="YYYY-MM-DD")
+    detailed_description: Optional[str] = Field(default="", description="Comprehensive description of defect")
     initial_severity: Optional[str] = Field(default="Minor", description="Critical, Major, or Minor")
     priority: Optional[str] = Field(default="Low", description="High, Medium, or Low")
 
+# Model specifically for edits: all fields default to None so unmentioned fields are ignored
+class PartialComplaintEditModel(BaseModel):
+    complaint_source: Optional[str] = Field(default=None)
+    customer_name: Optional[str] = Field(default=None)
+    product_name: Optional[str] = Field(default=None)
+    product_strength_grade: Optional[str] = Field(default=None)
+    batch_number: Optional[str] = Field(default=None)
+    manufacturing_date: Optional[str] = Field(default=None)
+    expiry_date: Optional[str] = Field(default=None)
+    quantity_affected: Optional[str] = Field(default=None)
+    complaint_type: Optional[str] = Field(default=None)
+    complaint_date: Optional[str] = Field(default=None)
+    detailed_description: Optional[str] = Field(default=None)
+
+class RiskAssessmentModel(BaseModel):
+    severity_classification: str = Field(default="Minor", description="Critical, Major, or Minor")
+    risk_justification: str = Field(default="", description="Pharma risk evaluation & GMP impact")
+    suggested_next_action: str = Field(default="", description="e.g. Route to QA investigation and issue replacement")
+    capa_recommendation: str = Field(default="", description="Corrective and preventive action recommendation")
+    regulatory_impact: str = Field(default="No immediate recall required", description="Recall or regulatory notification impact")
+
 class GraphState(TypedDict):
-    raw_text: str
-    form_data: dict
-    capa_suggestion: str
-    root_cause_hypothesis: str
-    completeness_score: int
+    action_type: str  # "log_complaint" | "edit_complaint" | "document_extract"
+    user_prompt: str
+    current_form: Dict[str, Any]
+    current_risk: Dict[str, Any]
+    ai_response_message: str
 
 llm = ChatGroq(
-    model_name="openai/gpt-oss-20b", 
+    model_name="openai/gpt-oss-20b",
     temperature=0.1,
-    max_tokens=500,
+    max_tokens=600,
     groq_api_key=os.getenv("GROQ_API_KEY")
 )
-def extract_complaint_node(state: GraphState):
-    """Extracts structured complaint entities using constrained LLM output."""
-    structured_llm = llm.with_structured_output(ExtractedComplaintData)
-    prompt = (
-        "You are an expert Pharmaceutical Quality Assurance specialist.\n"
-        "Extract all available complaint details from the text below. "
-        "Leave unknown fields as empty strings.\n\n"
-        f"Complaint Text:\n{state['raw_text']}"
+
+def copilot_agent_node(state: GraphState):
+    action = state["action_type"]
+    user_input = state["user_prompt"]
+    current_form = dict(state.get("current_form") or {})
+
+    if action == "edit_complaint":
+        # Extract ONLY the fields the user wants to patch
+        patch_llm = llm.with_structured_output(PartialComplaintEditModel)
+        edit_prompt = (
+            "Identify ONLY the fields explicitly mentioned for modification in this correction text. "
+            "Leave all untouched fields as null/None.\n\n"
+            f"Correction: {user_input}"
+        )
+        patch_result = patch_llm.invoke(edit_prompt)
+        patch_dict = {k: v for k, v in patch_result.model_dump().items() if v is not None and str(v).strip() != ""}
+
+        # Merge changes into existing form (preserving all previous data)
+        form_dict = {**current_form, **patch_dict}
+        modified_fields = list(patch_dict.keys())
+        bot_msg = f"Updated {', '.join(modified_fields)} while preserving all other complaint data."
+
+    else:
+        # Full extraction for log_complaint and document_extract
+        full_extractor = llm.with_structured_output(ComplaintFormModel)
+        extraction_prompt = (
+            "Extract all pharmaceutical complaint details from the text below. "
+            "Leave unknown fields empty.\n\n"
+            f"Text: {user_input}"
+        )
+        extracted = full_extractor.invoke(extraction_prompt)
+        form_dict = extracted.model_dump()
+        bot_msg = f"Extracted complaint details for {form_dict.get('product_name') or 'the reported product'}."
+
+    # Re-calculate Risk Assessment with updated form data
+    risk_llm = llm.with_structured_output(RiskAssessmentModel)
+    risk_prompt = (
+        f"Pharmaceutical QA Risk Assessment:\n"
+        f"Product: {form_dict.get('product_name')} ({form_dict.get('product_strength_grade')})\n"
+        f"Batch: {form_dict.get('batch_number')}\n"
+        f"Quantity: {form_dict.get('quantity_affected')}\n"
+        f"Issue: {form_dict.get('detailed_description') or form_dict.get('complaint_type')}\n\n"
+        "Provide: severity (Critical/Major/Minor), risk justification, suggested next action, and CAPA."
     )
-    result: ExtractedComplaintData = structured_llm.invoke(prompt)
-    return {"form_data": result.model_dump()}
+    risk_result: RiskAssessmentModel = risk_llm.invoke(risk_prompt)
+    risk_dict = risk_result.model_dump()
 
-def triage_and_capa_node(state: GraphState):
-    """Assesses QMS severity, root cause, CAPA recommendation, and completeness."""
-    form = state["form_data"]
-
-    triage_prompt = f"""You are a Pharmaceutical Quality Assurance Lead evaluating a GMP customer complaint.
-Product: {form.get('product_name')} ({form.get('product_strength_grade')})
-Batch Number: {form.get('batch_number')}
-Reported Issue: {form.get('detailed_description')}
-
-Respond with:
-1. HYPOTHESIZED ROOT CAUSE (1-2 sentences):
-2. RECOMMENDED CAPA ACTION (1-2 practical corrective/preventive steps):
-"""
-    response = llm.invoke(triage_prompt)
-    content = response.content
-
-    # Split response into root cause and CAPA
-    root_cause = "Pending QA investigation."
-    capa = content
-    if "RECOMMENDED CAPA" in content:
-        parts = content.split("RECOMMENDED CAPA")
-        root_cause = parts[0].replace("HYPOTHESIZED ROOT CAUSE", "").replace("1.", "").strip(":\n *")
-        capa = parts[1].strip(":\n *")
-
-    # Compute a completeness score based on populated fields
-    total_fields = len(form)
-    filled_fields = sum(1 for v in form.values() if v and str(v).strip())
-    score = int((filled_fields / total_fields) * 100) if total_fields else 0
+    # Sync severity and priority
+    form_dict["initial_severity"] = risk_dict["severity_classification"]
+    form_dict["priority"] = "High" if risk_dict["severity_classification"] == "Critical" else ("Medium" if risk_dict["severity_classification"] == "Major" else "Low")
 
     return {
-        "root_cause_hypothesis": root_cause,
-        "capa_suggestion": capa,
-        "completeness_score": score
+        "current_form": form_dict,
+        "current_risk": risk_dict,
+        "ai_response_message": bot_msg
     }
 
-# Build and compile LangGraph state workflow
 workflow = StateGraph(GraphState)
-workflow.add_node("extractor", extract_complaint_node)
-workflow.add_node("qa_triage", triage_and_capa_node)
-
-workflow.set_entry_point("extractor")
-workflow.add_edge("extractor", "qa_triage")
-workflow.add_edge("qa_triage", END)
-
-complaint_agent = workflow.compile()
+workflow.add_node("copilot", copilot_agent_node)
+workflow.set_entry_point("copilot")
+workflow.add_edge("copilot", END)
+complaint_copilot_agent = workflow.compile()
