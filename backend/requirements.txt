@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+sqlalchemy
+langgraph
+langchain-groq
+pypdf
+python-docx
+python-dotenv
