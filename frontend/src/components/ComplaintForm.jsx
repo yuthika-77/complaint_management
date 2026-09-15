@@ -3,6 +3,11 @@ import { resetAll } from '../store/complaintSlice';
 import axios from 'axios';
 import { RotateCcw, Save, ShieldAlert, Bot } from 'lucide-react';
 
+const api = axios.create({
+    baseURL: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/api',
+})
+
+
 export default function ComplaintForm() {
   const dispatch = useDispatch();
   const formData = useSelector((state) => state.complaint.formData);
@@ -10,7 +15,7 @@ export default function ComplaintForm() {
 
   const handleSave = async () => {
     try {
-      const res = await axios.post('http://127.0.0.1:8000/api/save-complaint', {
+      const res = await api.post('/save-complaint', {
         ...formData,
         root_cause_hypothesis: risk.risk_justification,
         recommended_capa: risk.capa_recommendation,

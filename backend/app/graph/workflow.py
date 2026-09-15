@@ -23,6 +23,8 @@ class ComplaintFormModel(BaseModel):
     initial_severity: Optional[str] = Field(default="Minor", description="Critical, Major, or Minor")
     priority: Optional[str] = Field(default="Low", description="High, Medium, or Low")
 
+#    """Same shape as ComplaintFormModel but everything optional/None so unmentioned fields don't get overwritten."""
+
 # Model specifically for edits: all fields default to None so unmentioned fields are ignored
 class PartialComplaintEditModel(BaseModel):
     complaint_source: Optional[str] = Field(default=None)
@@ -106,8 +108,8 @@ def copilot_agent_node(state: GraphState):
 
     # Sync severity and priority
     form_dict["initial_severity"] = risk_dict["severity_classification"]
-    form_dict["priority"] = "High" if risk_dict["severity_classification"] == "Critical" else ("Medium" if risk_dict["severity_classification"] == "Major" else "Low")
-
+    SEVERITY_TO_PRIORITY = {"Critical": "High", "Major": "Medium", "Minor": "Low"}
+    form_dict["priority"] = SEVERITY_TO_PRIORITY.get(risk_dict["severity_classification"], "Low")
     return {
         "current_form": form_dict,
         "current_risk": risk_dict,
